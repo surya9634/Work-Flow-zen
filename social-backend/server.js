@@ -1,4 +1,34 @@
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
+
+// Set the owner (business user) of a conversation for RAAG scoping
+app.post('/api/messenger/conversation-owner', (req, res) => {
+  try {
+    const { conversationId, ownerUserId } = req.body || {};
+    const convId = String(conversationId || '');
+    const owner = String(ownerUserId || '');
+    if (!convId || !owner) return res.status(400).json({ success: false, message: 'conversationId_and_ownerUserId_required' });
+    const conv = ensureConversation(convId);
+    conv.ownerUserId = owner;
+    messengerStore.conversations.set(convId, conv);
+    saveMessengerStore();
+    return res.json({ success: true, conversationId: convId, ownerUserId: owner });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: 'set_owner_failed' });
+  }
+});
+
+// Get conversation owner
+app.get('/api/messenger/conversation-owner', (req, res) => {
+  try {
+    const convId = String(req.query.conversationId || '');
+    if (!convId) return res.status(400).json({ success: false, message: 'conversationId_required' });
+    const conv = messengerStore.conversations.get(convId);
+    if (!conv) return res.status(404).json({ success: false, message: 'conversation_not_found' });
+    return res.json({ success: true, conversationId: convId, ownerUserId: conv.ownerUserId || '' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: 'get_owner_failed' });
+  }
+});
 const express = require('express');
 const session = require('express-session');
 const passport = require('passport');
@@ -187,6 +217,22 @@ function buildGlobalKB() {
       }
     }
     for (const v of byId.values()) kb.items.push(v);
+
+    // Include structured campaigns (campaignsStore2), prefer their fields and specs
+    try {
+      if (campaignsStore2 && campaignsStore2.campaigns) {
+        for (const c of campaignsStore2.campaigns.values()) {
+          const item = {
+            id: c.id,
+            name: c.name || c.id,
+            description: (c.brief && c.brief.description) || '',
+            specs: Array.isArray(c.specs) ? c.specs.map(s => String(s)) : [],
+            sources: ['campaigns']
+          };
+          kb.items.push(item);
+        }
+      }
+    } catch (_) {}
   } catch (_) {}
   return kb;
 }
@@ -271,6 +317,29 @@ async function answerWithGlobalAI(userText, userId) {
   var biz = globalKB.business && globalKB.business.name ? globalKB.business.name : 'our business';
   var recent = getRecentMemories(userId, 5).map(function(m){ return '- ' + m.title; }).join('\n');
   var analyticsLine = analyticsSummaryText();
+  // Load per-user system prompt and onboarding summary (scoped RAAG)
+  var userSystemPrompt = '';
+  try {
+    var db = readJsonSafeEnsure(profilePromptsFile, { profiles: {} });
+    var ukey = String(userId || '');
+    userSystemPrompt = (db && db.profiles && db.profiles[ukey] && db.profiles[ukey].systemPrompt) ? String(db.profiles[ukey].systemPrompt) : '';
+  } catch (_) {}
+  var onboardingSummary = '';
+  try {
+    var ob = authStore && authStore.onboardingByUser && authStore.onboardingByUser.get(String(userId || ''));
+    if (ob && typeof ob === 'object') {
+      var goals = Array.isArray(ob.goals) ? ob.goals.join(', ') : '';
+      var challenges = Array.isArray(ob.challenges) ? ob.challenges.join(', ') : '';
+      onboardingSummary = [
+        ob.businessName ? ('Business: ' + ob.businessName) : '',
+        ob.businessAbout ? ('About: ' + ob.businessAbout) : '',
+        ob.tone ? ('Tone: ' + ob.tone) : '',
+        ob.industry ? ('Industry: ' + ob.industry) : '',
+        goals ? ('Goals: ' + goals) : '',
+        challenges ? ('Challenges: ' + challenges) : ''
+      ].filter(Boolean).join('\n');
+    }
+  } catch (_) {}
   
   // Get list of available products from campaigns
   const availableProducts = [];
@@ -283,6 +352,8 @@ async function answerWithGlobalAI(userText, userId) {
   }
 
   var system = [
+    (userSystemPrompt ? ('Business-specific instructions (scoped):\n' + String(userSystemPrompt).slice(0, 2000)) : ''),
+    (onboardingSummary ? ('Onboarding context:\n' + onboardingSummary) : ''),
     'You are a professional sales agent for ' + biz + '. Your role is to assist customers with product inquiries and provide accurate information.',
     'IMPORTANT RULES TO FOLLOW:',
     '1. ONLY discuss products that are explicitly mentioned in the provided context or campaigns.',
@@ -526,7 +597,8 @@ function ensureConversation(conversationId, seed) {
     timestamp: new Date().toISOString(),
     aiMode: false,
     pending: { autoStartIfFirstMessage: false, initialMessage: '', profileId: 'default' },
-    messages: []
+    messages: [],
+    ownerUserId: (seed && seed.ownerUserId) || ''
   };
   messengerStore.conversations.set(convId, base);
   saveMessengerStore();
@@ -617,11 +689,12 @@ app.patch('/api/campaigns/:id', (req, res) => {
     const id = String(req.params.id || '');
     const existing = campaignsStore2.campaigns.get(id);
     if (!existing) return res.status(404).json({ error: 'not_found' });
-    const { name, description } = req.body || {};
+    const { name, description, specs } = req.body || {};
     const updated = {
       ...existing,
       name: typeof name === 'string' && name.trim() ? name.trim() : existing.name,
-      brief: { description: typeof description === 'string' ? description : (existing.brief && existing.brief.description) || '' }
+      brief: { description: typeof description === 'string' ? description : (existing.brief && existing.brief.description) || '' },
+      specs: Array.isArray(specs) ? specs.map(s => String(s)) : (existing.specs || [])
     };
     campaignsStore2.campaigns.set(id, updated);
     saveCampaigns();
@@ -629,6 +702,23 @@ app.patch('/api/campaigns/:id', (req, res) => {
     return res.json({ success: true, campaign: updated });
   } catch (e) {
     return res.status(500).json({ error: 'campaigns_patch_failed' });
+  }
+});
+
+// Set structured specs for a campaign
+app.post('/api/campaigns/:id/specs', (req, res) => {
+  try {
+    const id = String(req.params.id || '');
+    const existing = campaignsStore2.campaigns.get(id);
+    if (!existing) return res.status(404).json({ success: false, message: 'campaign_not_found' });
+    const specs = Array.isArray(req.body && req.body.specs) ? req.body.specs.map(s => String(s)) : [];
+    const updated = { ...existing, specs };
+    campaignsStore2.campaigns.set(id, updated);
+    saveCampaigns();
+    try { refreshGlobalKB(); } catch (_) {}
+    return res.json({ success: true, campaign: updated });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: 'campaign_specs_failed' });
   }
 });
 
@@ -687,6 +777,7 @@ app.get('/api/messenger/conversations', (_req, res) => {
       profilePic: c.profilePic || null,
       lastMessage: c.lastMessage || '',
       timestamp: c.timestamp || new Date().toISOString(),
+      ownerUserId: c.ownerUserId || ''
     }));
     return res.json(arr);
   } catch (e) {
@@ -762,7 +853,8 @@ app.get('/api/messenger/messages', (req, res) => {
     return res.json({
       messages: Array.isArray(conv.messages) ? conv.messages : [],
       systemPrompt,
-      aiMode: !!conv.aiMode
+      aiMode: !!conv.aiMode,
+      ownerUserId: conv.ownerUserId || ''
     });
   } catch (e) {
     return res.status(500).json({ error: 'messages_fetch_failed' });
@@ -776,7 +868,7 @@ app.post('/api/messenger/send-message', async (req, res) => {
     const convId = String(conversationId || '');
     if (!convId) return res.status(400).json({ error: 'conversationId_required' });
     if (!text) return res.status(400).json({ error: 'text_required' });
-    const conv = messengerStore.conversations.get(convId) || { id: convId, name: convId, messages: [], aiMode: false };
+    const conv = messengerStore.conversations.get(convId) || { id: convId, name: convId, messages: [], aiMode: false, ownerUserId: '' };
     const msg = { id: 'm_' + Date.now(), sender: sender || 'agent', text: String(text), timestamp: new Date().toISOString(), isRead: true };
     conv.messages = Array.isArray(conv.messages) ? conv.messages : [];
     conv.messages.push(msg);
@@ -823,7 +915,8 @@ app.post('/api/messenger/send-message', async (req, res) => {
     // If this is a customer message and Global AI is enabled, optionally auto-reply locally
     if ((sender || 'agent') === 'customer' && config.ai.globalAiEnabled) {
       try {
-        const { reply } = await answerWithGlobalAI(String(text), convId);
+        const contextUserId = conv.ownerUserId || convId;
+        const { reply } = await answerWithGlobalAI(String(text), contextUserId);
         const aiMsg = { id: 'm_' + (Date.now() + 1), sender: 'agent', text: String(reply).slice(0, 900), timestamp: new Date().toISOString(), isRead: true };
         conv.messages.push(aiMsg);
         conv.lastMessage = aiMsg.text;
@@ -865,7 +958,8 @@ app.post('/api/messenger/ai-reply', async (req, res) => {
     const conv = messengerStore.conversations.get(convId);
     if (!conv) return res.status(404).json({ error: 'conversation_not_found' });
     if (typeof systemPrompt === 'string') messengerStore.systemPrompts.set(convId, systemPrompt);
-    const { reply } = await answerWithGlobalAI(String(lastUserMessage || ''), convId);
+    const contextUserId = (conv && conv.ownerUserId) ? conv.ownerUserId : convId;
+    const { reply } = await answerWithGlobalAI(String(lastUserMessage || ''), contextUserId);
     const aiMsg = { id: 'm_' + Date.now(), sender: 'agent', text: String(reply).slice(0, 900), timestamp: new Date().toISOString(), isRead: true };
     conv.messages = Array.isArray(conv.messages) ? conv.messages : [];
     conv.messages.push(aiMsg);
@@ -1544,7 +1638,9 @@ app.post('/messenger/webhook', async (req, res) => {
 
           // If Global AI enabled, auto-reply on Messenger
           if (text && config.ai.globalAiEnabled) {
-            const { reply, sources } = await answerWithGlobalAI(text, senderId);
+            const conv = ensureConversation(senderId);
+            const contextUserId = (conv && conv.ownerUserId) ? conv.ownerUserId : senderId;
+            const { reply, sources } = await answerWithGlobalAI(text, contextUserId);
             try { appendMemory(senderId, String(event.message && event.message.mid || ''), `FB: ${text.slice(0,48)}`, { channel: 'messenger', sources }); } catch (_) {}
             if (config.facebook.pageToken) {
               await axios.post(`https://graph.facebook.com/v17.0/me/messages?access_token=${config.facebook.pageToken}`, {
