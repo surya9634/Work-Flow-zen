@@ -18,6 +18,7 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
 // Socket diagnostics
+io.on('connection', (socket) => {
   try { console.log('[socket.io] client connected', socket.id); } catch (_) {}
   socket.on('disconnect', () => { try { console.log('[socket.io] client disconnected', socket.id); } catch (_) {} });
 });
