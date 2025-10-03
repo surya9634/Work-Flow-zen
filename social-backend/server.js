@@ -1,3 +1,32 @@
+// --- AI Config endpoints ---
+app.get('/api/ai/config', (_req, res) => {
+  try {
+    return res.json({
+      success: true,
+      ai: {
+        globalAiEnabled: !!config.ai.globalAiEnabled,
+        globalAiMode: config.ai.globalAiMode,
+        memoryEnabled: !!config.ai.memoryEnabled,
+        groqModel: config.ai.groqModel,
+        groqApiKeySet: !!config.ai.groqApiKey
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false });
+  }
+});
+
+app.post('/api/ai/config', (req, res) => {
+  try {
+    const { globalAiEnabled, globalAiMode, memoryEnabled } = req.body || {};
+    if (typeof globalAiEnabled === 'boolean') config.ai.globalAiEnabled = globalAiEnabled;
+    if (typeof globalAiMode === 'string') config.ai.globalAiMode = globalAiMode;
+    if (typeof memoryEnabled === 'boolean') config.ai.memoryEnabled = memoryEnabled;
+    return res.json({ success: true, ai: { globalAiEnabled: !!config.ai.globalAiEnabled, globalAiMode: config.ai.globalAiMode, memoryEnabled: !!config.ai.memoryEnabled } });
+  } catch (e) {
+    return res.status(500).json({ success: false });
+  }
+});
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const express = require('express');
 const session = require('express-session');
@@ -55,7 +84,7 @@ const config = {
     groqApiKey: process.env.GROQ_API_KEY || '',
     groqModel: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
     autoReplyWebhook: String(process.env.AI_AUTO_REPLY_WEBHOOK || '').toLowerCase() === 'true',
-    globalAiEnabled: false,
+    globalAiEnabled: String(process.env.GLOBAL_AI_ENABLED || process.env.AI_GLOBAL_AI_ENABLED || '').toLowerCase() === 'true',
     globalAiMode: 'replace', // 'replace' | 'hybrid'
     memoryEnabled: true // per-user/per-conversation memory
   }
@@ -1767,15 +1796,23 @@ app.post('/messenger/webhook', async (req, res) => {
             const contextUserId = (conv && conv.ownerUserId) ? conv.ownerUserId : (pageOwner || senderId);
             const { reply, sources } = await answerWithGlobalAI(text, contextUserId);
             try { appendMemory(senderId, String(event.message && event.message.mid || ''), `FB: ${text.slice(0,48)}`, { channel: 'messenger', sources }); } catch (_) {}
+            // Always append and emit the AI reply to dashboard for visibility
+            const outgoing = { id: 'm_' + (Date.now() + 1), sender: 'agent', text: String(reply).slice(0, 900), timestamp: new Date().toISOString(), isRead: true };
+            appendMessage(senderId, outgoing);
+            try { io.emit('messenger:message_created', { conversationId: senderId, message: outgoing }); } catch (_) {}
+            // Attempt to send to Facebook if pageToken configured
             if (config.facebook.pageToken) {
-              await axios.post(`https://graph.facebook.com/v17.0/me/messages?access_token=${config.facebook.pageToken}`, {
-                recipient: { id: senderId },
-                message: { text: String(reply).slice(0, 900) }
-              }, { headers: { 'Content-Type': 'application/json' } });
-              const outgoing = { id: 'm_' + (Date.now() + 1), sender: 'agent', text: String(reply).slice(0, 900), timestamp: new Date().toISOString(), isRead: true };
-              appendMessage(senderId, outgoing);
-              try { io.emit('messenger:message_created', { conversationId: senderId, message: outgoing }); } catch (_) {}
-              bumpAnalytics('messenger', 'sent');
+              try {
+                await axios.post(`https://graph.facebook.com/v17.0/me/messages?access_token=${config.facebook.pageToken}`, {
+                  recipient: { id: senderId },
+                  message: { text: String(reply).slice(0, 900) }
+                }, { headers: { 'Content-Type': 'application/json' } });
+                bumpAnalytics('messenger', 'sent');
+              } catch (sendErr) {
+                try { console.warn('FB send failed (will keep local):', sendErr?.response?.data || sendErr?.message); } catch (_) {}
+              }
+            } else {
+              try { console.warn('FB pageToken not configured; AI reply stored locally only.'); } catch (_) {}
             }
           }
         } catch (e) {
