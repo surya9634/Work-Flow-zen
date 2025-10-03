@@ -168,97 +168,73 @@ const MessengerChat = () => {
     if (selectedContact?.id && !messages[selectedContact.id]) {
       loadMessages(selectedContact.id);
     }
-    // Subscribe to realtime message events
-    let socket;
-    try {
-      // dynamic import to avoid SSR issues
-      import('socket.io-client').then(({ io }) => {
-        if (ignore) return;
-        // Allow websocket with fallback to polling for hosts/proxies that don't support WS upgrade
-        socket = io(API_BASE, { transports: ['websocket', 'polling'], withCredentials: false });
-        socket.on('connect', () => { try { console.debug('[socket.io] connected', socket.id); } catch (_) {} });
-        socket.on('connect_error', (err) => { try { console.warn('[socket.io] connect_error', err?.message); } catch (_) {} });
-        socket.on('error', (err) => { try { console.warn('[socket.io] error', err?.message); } catch (_) {} });
-        socket.on('messenger:message_created', (payload) => {
-          if (!payload?.conversationId || !payload?.message) return;
-          const incoming = payload.message;
-          const normalized = {
-            ...incoming,
-            // unify payload shape (some places use `text`, others `message`)
-            text: (incoming.text ?? incoming.message ?? ''),
-            _iso: incoming.timestamp,
-            timestamp: (() => {
-              const d = new Date(incoming.timestamp);
-              return isNaN(d.getTime()) ? (incoming.timestamp || '') : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            })()
-          };
-          setMessages(prev => {
-            const arr = prev[payload.conversationId] || [];
-            if (arr.some(m => m.id === normalized.id)) return prev; // avoid duplicates
-            return { ...prev, [payload.conversationId]: [...arr, normalized] };
-          });
-          // Update contact preview and bump ordering
-          const preview = normalized.text || normalized.message || '';
-          updateContactPreview(payload.conversationId, preview);
+    return () => { ignore = true; };
+  }, [selectedContact?.id]);
 
-          // Auto-trigger backend AI reply when AI Mode is ON and a customer message arrives
-          // NOTE: Server already auto-replies for customer messages when enabled.
-          // To avoid double replies, do not trigger client-side when provider is local.
-          try {
-            const convId = payload.conversationId;
-            const isCustomer = String(normalized.sender).toLowerCase() === 'customer';
-            const isRemoteProvider = Boolean(import.meta?.env?.VITE_MESSENGER_API_URL); // remote FB uses webhook, safe to skip
-            if (isCustomer && aiMode[convId] && isRemoteProvider) {
-              const lastUserMessage = normalized.text || '';
-              const systemPrompt = systemPrompts[convId] || '';
-              if (lastUserMessage.trim()) {
-                fetch(`${API_BASE}/api/messenger/ai-reply`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ conversationId: convId, lastUserMessage, systemPrompt })
-                }).catch(() => {});
-              }
-            }
-          } catch (_) {}
+  // Initialize Socket.IO once (receive realtime updates for all conversations)
+  useEffect(() => {
+    let socket;
+    let cancelled = false;
+    // dynamic import to avoid SSR issues
+    import('socket.io-client').then(({ io }) => {
+      if (cancelled) return;
+      socket = io(API_BASE, { transports: ['websocket', 'polling'], withCredentials: false });
+      socket.on('connect', () => { try { console.debug('[socket.io] connected', socket.id); } catch (_) {} });
+      socket.on('connect_error', (err) => { try { console.warn('[socket.io] connect_error', err?.message); } catch (_) {} });
+      socket.on('error', (err) => { try { console.warn('[socket.io] error', err?.message); } catch (_) {} });
+      socket.on('messenger:message_created', (payload) => {
+        if (!payload?.conversationId || !payload?.message) return;
+        const incoming = payload.message;
+        const normalized = {
+          ...incoming,
+          text: (incoming.text ?? incoming.message ?? ''),
+          _iso: incoming.timestamp,
+          timestamp: (() => {
+            const d = new Date(incoming.timestamp);
+            return isNaN(d.getTime()) ? (incoming.timestamp || '') : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          })()
+        };
+        setMessages(prev => {
+          const arr = prev[payload.conversationId] || [];
+          if (arr.some(m => m.id === normalized.id)) return prev; // avoid duplicates
+          return { ...prev, [payload.conversationId]: [...arr, normalized] };
         });
-        socket.on('messenger:conversation_created', (conv) => {
-          if (!conv?.id) return;
-          const normalized = {
-            id: conv.id,
-            name: conv.name,
-            avatar: conv.profilePic || `https://unavatar.io/${encodeURIComponent(conv.name || 'user')}`,
-            lastMessage: conv.lastMessage || '',
+        const preview = normalized.text || normalized.message || '';
+        updateContactPreview(payload.conversationId, preview);
+      });
+      socket.on('messenger:conversation_created', (conv) => {
+        if (!conv?.id) return;
+        const normalized = {
+          id: conv.id,
+          name: conv.name,
+          avatar: conv.profilePic || `https://unavatar.io/${encodeURIComponent(conv.name || 'user')}`,
+          lastMessage: conv.lastMessage || '',
+          timestamp: 'now',
+          isOnline: true,
+          lastUpdated: conv.timestamp || new Date().toISOString(),
+        };
+        setContacts(prev => [normalized, ...prev]);
+      });
+      socket.on('messenger:conversations_synced', async () => {
+        try {
+          const res = await fetch(`${API_BASE}/api/messenger/conversations`);
+          const data = await res.json();
+          if (!Array.isArray(data)) return;
+          const normalized = data.map(c => ({
+            id: c.id,
+            name: c.name,
+            avatar: c.profilePic || `https://unavatar.io/${encodeURIComponent(c.name)}`,
+            lastMessage: c.lastMessage || '',
             timestamp: 'now',
             isOnline: true,
-            lastUpdated: conv.timestamp || new Date().toISOString(),
-          };
-          setContacts(prev => [normalized, ...prev]);
-        });
-        // When backend reports bulk sync, refresh the list automatically
-        socket.on('messenger:conversations_synced', async () => {
-          try {
-            const res = await fetch(`${API_BASE}/api/messenger/conversations`);
-            const data = await res.json();
-            if (!Array.isArray(data)) return;
-            const normalized = data.map(c => ({
-              id: c.id,
-              name: c.name,
-              avatar: c.profilePic || `https://unavatar.io/${encodeURIComponent(c.name)}`,
-              lastMessage: c.lastMessage || '',
-              timestamp: 'now',
-              isOnline: true,
-              lastUpdated: c.timestamp || new Date().toISOString(),
-            }));
-            setContacts(normalized);
-          } catch (_) {}
-        });
+            lastUpdated: c.timestamp || new Date().toISOString(),
+          }));
+          setContacts(normalized);
+        } catch (_) {}
       });
-    } catch (_) {}
-    return () => {
-      ignore = true;
-      if (socket) socket.close();
-    };
-  }, [selectedContact?.id]);
+    });
+    return () => { cancelled = true; if (socket) socket.close(); };
+  }, []);
 
   // Filter contacts based on search term and sort by most recent activity
   const filteredContacts = contacts
