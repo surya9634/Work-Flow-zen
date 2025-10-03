@@ -816,6 +816,18 @@ app.post('/api/campaigns', (req, res) => {
       specs: Array.isArray(specs) ? specs.map(s => String(s)) : (existing.specs || []),
       ownerUserId: typeof ownerUserId === 'string' ? ownerUserId : (existing.ownerUserId || '')
     };
+    // Auto-derive specs from description if specs are empty
+    try {
+      if ((!updated.specs || updated.specs.length === 0) && updated.brief && typeof updated.brief.description === 'string') {
+        const desc = updated.brief.description || '';
+        const parts = desc
+          .split(/\n|\r|•|\-|\u2022|\.|;|\|/)
+          .map(s => s.trim())
+          .filter(s => s.length > 2 && /[a-zA-Z0-9]/.test(s));
+        const dedup = Array.from(new Set(parts)).slice(0, 8);
+        if (dedup.length) updated.specs = dedup;
+      }
+    } catch (_) {}
     campaignsStore2.campaigns.set(cid, updated);
     saveCampaigns();
     try { refreshGlobalKB(); } catch (_) {}
@@ -839,6 +851,18 @@ app.patch('/api/campaigns/:id', (req, res) => {
       specs: Array.isArray(specs) ? specs.map(s => String(s)) : (existing.specs || []),
       ownerUserId: typeof ownerUserId === 'string' ? ownerUserId : (existing.ownerUserId || '')
     };
+    // Auto-derive specs from description if specs are empty
+    try {
+      if ((!updated.specs || updated.specs.length === 0) && updated.brief && typeof updated.brief.description === 'string') {
+        const desc = updated.brief.description || '';
+        const parts = desc
+          .split(/\n|\r|•|\-|\u2022|\.|;|\|/)
+          .map(s => s.trim())
+          .filter(s => s.length > 2 && /[a-zA-Z0-9]/.test(s));
+        const dedup = Array.from(new Set(parts)).slice(0, 8);
+        if (dedup.length) updated.specs = dedup;
+      }
+    } catch (_) {}
     campaignsStore2.campaigns.set(id, updated);
     saveCampaigns();
     try { refreshGlobalKB(); } catch (_) {}
