@@ -1734,19 +1734,10 @@ app.post('/messenger/webhook', async (req, res) => {
           const senderId = event.sender && event.sender.id ? String(event.sender.id) : null;
           const text = event.message && event.message.text ? String(event.message.text) : '';
           if (!senderId) continue;
-
-          // Upsert local conversation and store incoming message
           if (text) {
             const incoming = { id: String(event.message && event.message.mid || ('m_' + Date.now())), sender: 'customer', text, timestamp: new Date().toISOString(), isRead: false };
             const conv = appendMessage(senderId, incoming);
-            // Auto-bind owner from page mapping if not already set
-            if (pageOwner && !conv.ownerUserId) {
-              conv.ownerUserId = pageOwner;
-              messengerStore.conversations.set(senderId, conv);
-              saveMessengerStore();
-            }
-            // Ensure again within message scope (safe and cheap)
-            try { if (pageOwner) ensureDefaultCampaignForOwner(pageOwner); } catch (_) {}
+            try { io.emit('messenger:message_created', { conversationId: senderId, message: incoming }); } catch (_) {}
             // If profilePic is missing, try to fetch it now for better UI
             try {
               if (!conv.profilePic && config.facebook.pageToken) {
@@ -1783,6 +1774,7 @@ app.post('/messenger/webhook', async (req, res) => {
               }, { headers: { 'Content-Type': 'application/json' } });
               const outgoing = { id: 'm_' + (Date.now() + 1), sender: 'agent', text: String(reply).slice(0, 900), timestamp: new Date().toISOString(), isRead: true };
               appendMessage(senderId, outgoing);
+              try { io.emit('messenger:message_created', { conversationId: senderId, message: outgoing }); } catch (_) {}
               bumpAnalytics('messenger', 'sent');
             }
           }
