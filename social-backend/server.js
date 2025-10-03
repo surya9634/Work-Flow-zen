@@ -388,8 +388,27 @@ async function answerWithGlobalAI(userText, userId) {
     '4. End with a call to action (e.g., "Would you like more information about this product?")'
   ].filter(Boolean).join('\n');
   
-  var reply = await generateWithGroq(userText, system);
-  return { reply: reply, sources: ctx.items.map(function(i){ return i.id; }) };
+  try {
+    var reply = await generateWithGroq(userText, system);
+    return { reply: reply, sources: ctx.items.map(function(i){ return i.id; }) };
+  } catch (e) {
+    // Graceful fallback synthesis from context when Groq is unavailable
+    try { console.warn('AI fallback used:', e && e.message ? e.message : e); } catch (_) {}
+    var top = (ctx && Array.isArray(ctx.items)) ? ctx.items[0] : null;
+    var productName = top && top.name ? top.name : 'our product';
+    var specs = (top && Array.isArray(top.specs)) ? top.specs : [];
+    var specLines = specs.length ? specs.map(function(s){ return '- ' + String(s); }).join('\n') : '- No detailed specifications have been listed yet.';
+    var fallback = [
+      'We offer ' + productName + '.',
+      '',
+      'Specifications:',
+      specLines,
+      '',
+      'For pricing information, please contact our sales team.',
+      'Would you like more information about this product?'
+    ].join('\n');
+    return { reply: fallback, sources: ctx.items.map(function(i){ return i.id; }) };
+  }
 }
 
 // Helper to choose WhatsApp credentials by mode
@@ -1707,6 +1726,8 @@ app.post('/messenger/webhook', async (req, res) => {
     for (const entry of entries) {
       const pageId = String(entry && entry.id || '');
       const pageOwner = pageId ? getOwnerForPage(pageId) : '';
+      // Ensure the page owner has at least one campaign
+      try { if (pageOwner) ensureDefaultCampaignForOwner(pageOwner); } catch (_) {}
       const messaging = Array.isArray(entry.messaging) ? entry.messaging : [];
       for (const event of messaging) {
         try {
@@ -1724,6 +1745,8 @@ app.post('/messenger/webhook', async (req, res) => {
               messengerStore.conversations.set(senderId, conv);
               saveMessengerStore();
             }
+            // Ensure again within message scope (safe and cheap)
+            try { if (pageOwner) ensureDefaultCampaignForOwner(pageOwner); } catch (_) {}
             // If profilePic is missing, try to fetch it now for better UI
             try {
               if (!conv.profilePic && config.facebook.pageToken) {
@@ -1748,6 +1771,8 @@ app.post('/messenger/webhook', async (req, res) => {
               messengerStore.conversations.set(senderId, conv);
               saveMessengerStore();
             }
+            // Ensure at least one campaign for this owner before answering
+            try { if (pageOwner) ensureDefaultCampaignForOwner(pageOwner); } catch (_) {}
             const contextUserId = (conv && conv.ownerUserId) ? conv.ownerUserId : (pageOwner || senderId);
             const { reply, sources } = await answerWithGlobalAI(text, contextUserId);
             try { appendMemory(senderId, String(event.message && event.message.mid || ''), `FB: ${text.slice(0,48)}`, { channel: 'messenger', sources }); } catch (_) {}
