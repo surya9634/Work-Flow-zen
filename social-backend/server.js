@@ -1,34 +1,4 @@
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
-
-// Set the owner (business user) of a conversation for RAAG scoping
-app.post('/api/messenger/conversation-owner', (req, res) => {
-  try {
-    const { conversationId, ownerUserId } = req.body || {};
-    const convId = String(conversationId || '');
-    const owner = String(ownerUserId || '');
-    if (!convId || !owner) return res.status(400).json({ success: false, message: 'conversationId_and_ownerUserId_required' });
-    const conv = ensureConversation(convId);
-    conv.ownerUserId = owner;
-    messengerStore.conversations.set(convId, conv);
-    saveMessengerStore();
-    return res.json({ success: true, conversationId: convId, ownerUserId: owner });
-  } catch (e) {
-    return res.status(500).json({ success: false, message: 'set_owner_failed' });
-  }
-});
-
-// Get conversation owner
-app.get('/api/messenger/conversation-owner', (req, res) => {
-  try {
-    const convId = String(req.query.conversationId || '');
-    if (!convId) return res.status(400).json({ success: false, message: 'conversationId_required' });
-    const conv = messengerStore.conversations.get(convId);
-    if (!conv) return res.status(404).json({ success: false, message: 'conversation_not_found' });
-    return res.json({ success: true, conversationId: convId, ownerUserId: conv.ownerUserId || '' });
-  } catch (e) {
-    return res.status(500).json({ success: false, message: 'get_owner_failed' });
-  }
-});
 const express = require('express');
 const session = require('express-session');
 const passport = require('passport');
