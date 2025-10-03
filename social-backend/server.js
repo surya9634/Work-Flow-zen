@@ -95,6 +95,8 @@ const dataDir = path.join(__dirname, 'data');
 const profileFile = path.join(dataDir, 'businessProfile.json');
 const profilePromptsFile = path.join(dataDir, 'profile-prompts.json');
 const userMemoriesFile = path.join(dataDir, 'user-memories.json');
+const defaultOwnerFile = path.join(dataDir, 'default-owner.json');
+const pageOwnersFile = path.join(dataDir, 'page-owners.json');
 ensureDir(dataDir);
 
 // Load persisted integrations (Facebook Page token/id) on startup
@@ -197,6 +199,7 @@ function buildGlobalKB() {
             name: c.name || c.id,
             description: (c.brief && c.brief.description) || '',
             specs: Array.isArray(c.specs) ? c.specs.map(s => String(s)) : [],
+            ownerUserId: c.ownerUserId || '',
             sources: ['campaigns']
           };
           kb.items.push(item);
@@ -235,6 +238,41 @@ app.get('/api/analytics', (_req, res) => {
   }
 });
 
+// Page owners management (pageId -> ownerUserId)
+app.post('/api/page-owners', (req, res) => {
+  try {
+    const { pageId, ownerUserId } = req.body || {};
+    const pid = String(pageId || '');
+    const owner = String(ownerUserId || '');
+    if (!pid || !owner) return res.status(400).json({ success: false, message: 'pageId_and_ownerUserId_required' });
+    const ok = setOwnerForPage(pid, owner);
+    if (!ok) return res.status(500).json({ success: false, message: 'save_failed' });
+    return res.json({ success: true, pageId: pid, ownerUserId: owner });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: 'save_failed' });
+  }
+});
+
+app.get('/api/page-owners/:pageId', (req, res) => {
+  try {
+    const pid = String(req.params.pageId || '');
+    if (!pid) return res.status(400).json({ success: false, message: 'pageId_required' });
+    const owner = getOwnerForPage(pid);
+    return res.json({ success: true, pageId: pid, ownerUserId: owner || '' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: 'fetch_failed' });
+  }
+});
+
+app.get('/api/page-owners', (_req, res) => {
+  try {
+    const j = readJsonSafeEnsure(pageOwnersFile, { pages: {} });
+    return res.json({ success: true, pages: j.pages || {} });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: 'fetch_failed' });
+  }
+});
+
 function getRecentMemories(userId, limit) {
   try {
     const db = readJsonSafeEnsure(userMemoriesFile, { users: {} });
@@ -243,11 +281,15 @@ function getRecentMemories(userId, limit) {
   } catch (_) { return []; }
 }
 
-function retrieveContext(query, k) {
+function retrieveContext(query, k, ownerUserId) {
   var q = String(query || '').toLowerCase();
   var scored = [];
-  for (var i = 0; i < globalKB.items.length; i++) {
-    var it = globalKB.items[i];
+  var items = globalKB.items;
+  if (ownerUserId) {
+    items = items.filter(function(it){ return String(it.ownerUserId || '') === String(ownerUserId); });
+  }
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
     var hay = (it.name + ' ' + it.description + ' ' + (it.keywords || []).join(' ')).toLowerCase();
     var score = 0;
     if (hay.indexOf(q) >= 0) score += 5;
@@ -282,7 +324,7 @@ function analyticsSummaryText() {
 }
 
 async function answerWithGlobalAI(userText, userId) {
-  var ctx = retrieveContext(userText, 3);
+  var ctx = retrieveContext(userText, 3, String(userId || ''));
   var tone = globalKB.business && globalKB.business.tone ? globalKB.business.tone : 'Friendly, helpful, concise';
   var biz = globalKB.business && globalKB.business.name ? globalKB.business.name : 'our business';
   var recent = getRecentMemories(userId, 5).map(function(m){ return '- ' + m.title; }).join('\n');
@@ -388,6 +430,8 @@ const upload = multer({ storage, limits: { fileSize: 15 * 1024 * 1024 } }); // 1
 try { loadMessengerStore(); } catch (_) {}
 try { ensureDir(path.dirname(profilePromptsFile)); readJsonSafeEnsure(profilePromptsFile, { profiles: {} }); } catch (_) {}
 try { ensureDir(path.dirname(userMemoriesFile)); readJsonSafeEnsure(userMemoriesFile, { users: {} }); } catch (_) {}
+try { readJsonSafeEnsure(defaultOwnerFile, { ownerUserId: '' }); } catch (_) {}
+try { readJsonSafeEnsure(pageOwnersFile, { pages: {} }); } catch (_) {}
 
 // --- Minimal in-memory auth + onboarding for demo ---
 const authStore = {
@@ -396,6 +440,32 @@ const authStore = {
   tokens: new Map(),       // token -> userId
   onboardingByUser: new Map(), // userId -> onboarding data
 };
+
+// Default owner helpers (for auto-mapping new conversations)
+function getPersistedDefaultOwner() {
+  try { const j = readJsonSafeEnsure(defaultOwnerFile, { ownerUserId: '' }); return String(j.ownerUserId || ''); } catch (_) { return ''; }
+}
+function setPersistedDefaultOwner(userId) {
+  try { writeJsonSafe(defaultOwnerFile, { ownerUserId: String(userId || '') }); return true; } catch (_) { return false; }
+}
+function computeFallbackDefaultOwner() {
+  try {
+    // Prefer exactly one onboarded user
+    const ids = Array.from(authStore.onboardingByUser.keys());
+    if (ids.length === 1) return String(ids[0]);
+    // Else if exactly one user exists in usersById
+    const all = Array.from(authStore.usersById.keys());
+    if (all.length === 1) return String(all[0]);
+  } catch (_) {}
+  return '';
+}
+function getDefaultOwnerUserId() {
+  const persisted = getPersistedDefaultOwner();
+  if (persisted) return persisted;
+  const fallback = computeFallbackDefaultOwner();
+  if (fallback) { try { setPersistedDefaultOwner(fallback); } catch (_) {} }
+  return fallback;
+}
 
 function createUser(email, password) {
   const id = 'u_' + Math.random().toString(36).slice(2, 10);
@@ -568,7 +638,7 @@ function ensureConversation(conversationId, seed) {
     aiMode: false,
     pending: { autoStartIfFirstMessage: false, initialMessage: '', profileId: 'default' },
     messages: [],
-    ownerUserId: (seed && seed.ownerUserId) || ''
+    ownerUserId: (seed && seed.ownerUserId) || getDefaultOwnerUserId() || ''
   };
   messengerStore.conversations.set(convId, base);
   saveMessengerStore();
@@ -596,6 +666,24 @@ function saveCampaigns() {
   const arr = Array.from(campaignsStore2.campaigns.values());
   writeJsonSafe(campaignsFile, { campaigns: arr });
 }
+// Ensure an owner has at least one campaign; create a default if missing
+function ensureDefaultCampaignForOwner(ownerUserId) {
+  try {
+    const owner = String(ownerUserId || '');
+    if (!owner) return null;
+    const any = Array.from(campaignsStore2.campaigns.values()).some(c => String(c.ownerUserId || '') === owner);
+    if (any) return null;
+    const profile = readBusinessProfile() || {};
+    const bizName = (profile.business && profile.business.name) ? String(profile.business.name) : 'Default Product';
+    const about = (profile.business && profile.business.about) ? String(profile.business.about) : '';
+    const id = 'c_' + Date.now();
+    const created = { id, name: bizName, ownerUserId: owner, brief: { description: about }, specs: [] };
+    campaignsStore2.campaigns.set(id, created);
+    saveCampaigns();
+    try { refreshGlobalKB(); } catch (_) {}
+    return created;
+  } catch (_) { return null; }
+}
 loadCampaigns();
 
 // --- Mother AI Config Store ---
@@ -621,9 +709,14 @@ loadMotherAIStore();
 // Minimal campaigns API for UI
 app.get('/api/campaigns', (_req, res) => {
   try {
-    const arr = Array.from(campaignsStore2.campaigns.values()).map(c => ({
+    const ownerUserId = String((_req.query && _req.query.ownerUserId) || '');
+    const all = Array.from(campaignsStore2.campaigns.values());
+    const filtered = ownerUserId ? all.filter(c => String(c.ownerUserId || '') === ownerUserId) : all;
+    const arr = filtered.map(c => ({
       id: c.id,
       name: c.name || c.id,
+      ownerUserId: c.ownerUserId || '',
+      specs: Array.isArray(c.specs) ? c.specs : [],
       brief: { description: (c.brief && c.brief.description) || '' }
     }));
     return res.json(arr);
@@ -635,14 +728,16 @@ app.get('/api/campaigns', (_req, res) => {
 // Upsert a campaign (rename or create)
 app.post('/api/campaigns', (req, res) => {
   try {
-    const { id, name, description } = req.body || {};
+    const { id, name, description, specs, ownerUserId } = req.body || {};
     const cid = String(id || ('c_' + Date.now()));
-    const existing = campaignsStore2.campaigns.get(cid) || { id: cid, name: cid, brief: { description: '' } };
+    const existing = campaignsStore2.campaigns.get(cid) || { id: cid, name: cid, brief: { description: '' }, ownerUserId: '', specs: [] };
     const updated = {
       ...existing,
       id: cid,
       name: typeof name === 'string' && name.trim() ? name.trim() : (existing.name || cid),
-      brief: { description: typeof description === 'string' ? description : (existing.brief && existing.brief.description) || '' }
+      brief: { description: typeof description === 'string' ? description : (existing.brief && existing.brief.description) || '' },
+      specs: Array.isArray(specs) ? specs.map(s => String(s)) : (existing.specs || []),
+      ownerUserId: typeof ownerUserId === 'string' ? ownerUserId : (existing.ownerUserId || '')
     };
     campaignsStore2.campaigns.set(cid, updated);
     saveCampaigns();
@@ -659,12 +754,13 @@ app.patch('/api/campaigns/:id', (req, res) => {
     const id = String(req.params.id || '');
     const existing = campaignsStore2.campaigns.get(id);
     if (!existing) return res.status(404).json({ error: 'not_found' });
-    const { name, description, specs } = req.body || {};
+    const { name, description, specs, ownerUserId } = req.body || {};
     const updated = {
       ...existing,
       name: typeof name === 'string' && name.trim() ? name.trim() : existing.name,
       brief: { description: typeof description === 'string' ? description : (existing.brief && existing.brief.description) || '' },
-      specs: Array.isArray(specs) ? specs.map(s => String(s)) : (existing.specs || [])
+      specs: Array.isArray(specs) ? specs.map(s => String(s)) : (existing.specs || []),
+      ownerUserId: typeof ownerUserId === 'string' ? ownerUserId : (existing.ownerUserId || '')
     };
     campaignsStore2.campaigns.set(id, updated);
     saveCampaigns();
@@ -752,6 +848,35 @@ app.get('/api/messenger/conversations', (_req, res) => {
     return res.json(arr);
   } catch (e) {
     return res.status(500).json({ error: 'conversations_list_failed' });
+  }
+});
+
+// Manage conversation owner (manual override)
+app.post('/api/messenger/conversation-owner', (req, res) => {
+  try {
+    const { conversationId, ownerUserId } = req.body || {};
+    const convId = String(conversationId || '');
+    const owner = String(ownerUserId || '');
+    if (!convId || !owner) return res.status(400).json({ success: false, message: 'conversationId_and_ownerUserId_required' });
+    const conv = ensureConversation(convId);
+    conv.ownerUserId = owner;
+    messengerStore.conversations.set(convId, conv);
+    saveMessengerStore();
+    return res.json({ success: true, conversationId: convId, ownerUserId: owner });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: 'set_owner_failed' });
+  }
+});
+
+app.get('/api/messenger/conversation-owner', (req, res) => {
+  try {
+    const convId = String(req.query.conversationId || '');
+    if (!convId) return res.status(400).json({ success: false, message: 'conversationId_required' });
+    const conv = messengerStore.conversations.get(convId);
+    if (!conv) return res.status(404).json({ success: false, message: 'conversation_not_found' });
+    return res.json({ success: true, conversationId: convId, ownerUserId: conv.ownerUserId || '' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: 'get_owner_failed' });
   }
 });
 
@@ -1580,6 +1705,8 @@ app.post('/messenger/webhook', async (req, res) => {
     }
     const entries = Array.isArray(body.entry) ? body.entry : [];
     for (const entry of entries) {
+      const pageId = String(entry && entry.id || '');
+      const pageOwner = pageId ? getOwnerForPage(pageId) : '';
       const messaging = Array.isArray(entry.messaging) ? entry.messaging : [];
       for (const event of messaging) {
         try {
@@ -1591,6 +1718,12 @@ app.post('/messenger/webhook', async (req, res) => {
           if (text) {
             const incoming = { id: String(event.message && event.message.mid || ('m_' + Date.now())), sender: 'customer', text, timestamp: new Date().toISOString(), isRead: false };
             const conv = appendMessage(senderId, incoming);
+            // Auto-bind owner from page mapping if not already set
+            if (pageOwner && !conv.ownerUserId) {
+              conv.ownerUserId = pageOwner;
+              messengerStore.conversations.set(senderId, conv);
+              saveMessengerStore();
+            }
             // If profilePic is missing, try to fetch it now for better UI
             try {
               if (!conv.profilePic && config.facebook.pageToken) {
@@ -1609,7 +1742,13 @@ app.post('/messenger/webhook', async (req, res) => {
           // If Global AI enabled, auto-reply on Messenger
           if (text && config.ai.globalAiEnabled) {
             const conv = ensureConversation(senderId);
-            const contextUserId = (conv && conv.ownerUserId) ? conv.ownerUserId : senderId;
+            // If page has owner mapping, enforce it on the conversation
+            if (pageOwner && !conv.ownerUserId) {
+              conv.ownerUserId = pageOwner;
+              messengerStore.conversations.set(senderId, conv);
+              saveMessengerStore();
+            }
+            const contextUserId = (conv && conv.ownerUserId) ? conv.ownerUserId : (pageOwner || senderId);
             const { reply, sources } = await answerWithGlobalAI(text, contextUserId);
             try { appendMemory(senderId, String(event.message && event.message.mid || ''), `FB: ${text.slice(0,48)}`, { channel: 'messenger', sources }); } catch (_) {}
             if (config.facebook.pageToken) {
