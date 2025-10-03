@@ -109,6 +109,64 @@ try {
   }
 } catch (_) {}
 
+// --- Page owner mapping helpers ---
+function getOwnerForPage(pageId) {
+  try {
+    const j = readJsonSafeEnsure(pageOwnersFile, { pages: {} });
+    const pid = String(pageId || '');
+    return (j.pages && j.pages[pid]) ? String(j.pages[pid]) : '';
+  } catch (_) { return ''; }
+}
+
+function setOwnerForPage(pageId, ownerUserId) {
+  try {
+    const pid = String(pageId || '');
+    const owner = String(ownerUserId || '');
+    if (!pid || !owner) return false;
+    const j = readJsonSafeEnsure(pageOwnersFile, { pages: {} });
+    j.pages = j.pages || {};
+    j.pages[pid] = owner;
+    writeJsonSafe(pageOwnersFile, j);
+    return true;
+  } catch (_) { return false; }
+}
+
+function ensureDefaultOwnerUser() {
+  try {
+    // read default owner
+    const j = readJsonSafeEnsure(defaultOwnerFile, { ownerUserId: '' });
+    let ownerId = String(j.ownerUserId || '');
+    // if exists and valid, return
+    if (ownerId && authStore.usersById.get(ownerId)) return ownerId;
+    // else pick first existing user if any
+    const anyUser = Array.from(authStore.usersById.values())[0] || null;
+    if (anyUser && anyUser.id) {
+      ownerId = anyUser.id;
+      writeJsonSafe(defaultOwnerFile, { ownerUserId: ownerId });
+      return ownerId;
+    }
+    // create a fallback demo owner
+    const demoEmail = 'owner@return.local';
+    const demoPass = 'owner';
+    const u = createUser(demoEmail, demoPass);
+    ownerId = u.id;
+    writeJsonSafe(defaultOwnerFile, { ownerUserId: ownerId });
+    return ownerId;
+  } catch (_) { return ''; }
+}
+
+function ensurePageOwner(pageId) {
+  try {
+    const pid = String(pageId || '');
+    if (!pid) return '';
+    const existing = getOwnerForPage(pid);
+    if (existing) return existing;
+    const owner = ensureDefaultOwnerUser();
+    if (owner) setOwnerForPage(pid, owner);
+    return owner || '';
+  } catch (_) { return ''; }
+}
+
 function ensureDir(p) { try { fs.mkdirSync(p, { recursive: true }); } catch (_) {} }
 function readJsonSafeEnsure(file, fallback) { try { if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify(fallback || {}, null, 2)); return JSON.parse(fs.readFileSync(file, 'utf8') || 'null'); } catch (_) { return JSON.parse(JSON.stringify(fallback || null)); } }
 function writeJsonSafe(file, data) { try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); return true; } catch (_) { return false; } }
@@ -1725,7 +1783,8 @@ app.post('/messenger/webhook', async (req, res) => {
     const entries = Array.isArray(body.entry) ? body.entry : [];
     for (const entry of entries) {
       const pageId = String(entry && entry.id || '');
-      const pageOwner = pageId ? getOwnerForPage(pageId) : '';
+      let pageOwner = pageId ? getOwnerForPage(pageId) : '';
+      if (!pageOwner && pageId) { try { pageOwner = ensurePageOwner(pageId) || ''; } catch (_) {} }
       // Ensure the page owner has at least one campaign
       try { if (pageOwner) ensureDefaultCampaignForOwner(pageOwner); } catch (_) {}
       const messaging = Array.isArray(entry.messaging) ? entry.messaging : [];
