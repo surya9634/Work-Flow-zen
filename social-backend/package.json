@@ -23,7 +23,6 @@
     "passport-facebook": "^3.0.0",
     "socket.io": "^4.7.5",
     "html-to-text": "^9.0.5",
-    "onnxruntime-node": "1.20.0",
     "multer": "^1.4.5-lts.1",
     "groq-sdk": "^0.5.0"
   },
