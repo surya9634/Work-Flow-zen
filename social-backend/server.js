@@ -1,32 +1,3 @@
-// --- AI Config endpoints ---
-app.get('/api/ai/config', (_req, res) => {
-  try {
-    return res.json({
-      success: true,
-      ai: {
-        globalAiEnabled: !!config.ai.globalAiEnabled,
-        globalAiMode: config.ai.globalAiMode,
-        memoryEnabled: !!config.ai.memoryEnabled,
-        groqModel: config.ai.groqModel,
-        groqApiKeySet: !!config.ai.groqApiKey
-      }
-    });
-  } catch (e) {
-    return res.status(500).json({ success: false });
-  }
-});
-
-app.post('/api/ai/config', (req, res) => {
-  try {
-    const { globalAiEnabled, globalAiMode, memoryEnabled } = req.body || {};
-    if (typeof globalAiEnabled === 'boolean') config.ai.globalAiEnabled = globalAiEnabled;
-    if (typeof globalAiMode === 'string') config.ai.globalAiMode = globalAiMode;
-    if (typeof memoryEnabled === 'boolean') config.ai.memoryEnabled = memoryEnabled;
-    return res.json({ success: true, ai: { globalAiEnabled: !!config.ai.globalAiEnabled, globalAiMode: config.ai.globalAiMode, memoryEnabled: !!config.ai.memoryEnabled } });
-  } catch (e) {
-    return res.status(500).json({ success: false });
-  }
-});
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const express = require('express');
 const session = require('express-session');
