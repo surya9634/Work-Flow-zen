@@ -455,7 +455,18 @@ async function answerWithGlobalAI(userText, userId) {
     var top = (ctx && Array.isArray(ctx.items)) ? ctx.items[0] : null;
     var productName = top && top.name ? top.name : 'our product';
     var specs = (top && Array.isArray(top.specs)) ? top.specs : [];
-    var specLines = specs.length ? specs.map(function(s){ return '- ' + String(s); }).join('\n') : '- No detailed specifications have been listed yet.';
+    if (!specs || specs.length === 0) {
+      try {
+        var desc = String((top && top.description) || '');
+        var parts = desc
+          .split(/\n|\r|•|\-|\u2022|\.|;|\|/)
+          .map(function(s){ return s.trim(); })
+          .filter(function(s){ return s.length > 2 && /[a-zA-Z0-9]/.test(s); });
+        var dedup = Array.from(new Set(parts)).slice(0, 8);
+        if (dedup.length) specs = dedup;
+      } catch (_) {}
+    }
+    var specLines = (specs && specs.length) ? specs.map(function(s){ return '- ' + String(s); }).join('\n') : '- No detailed specifications have been listed yet.';
     var fallback = [
       'We offer ' + productName + '.',
       '',
@@ -754,7 +765,16 @@ function ensureDefaultCampaignForOwner(ownerUserId) {
     const bizName = (profile.business && profile.business.name) ? String(profile.business.name) : 'Default Product';
     const about = (profile.business && profile.business.about) ? String(profile.business.about) : '';
     const id = 'c_' + Date.now();
-    const created = { id, name: bizName, ownerUserId: owner, brief: { description: about }, specs: [] };
+    // Derive specs from about/description when available
+    let specs = [];
+    try {
+      const parts = String(about || '')
+        .split(/\n|\r|•|\-|\u2022|\.|;|\|/)
+        .map(s => s.trim())
+        .filter(s => s.length > 2 && /[a-zA-Z0-9]/.test(s));
+      specs = Array.from(new Set(parts)).slice(0, 8);
+    } catch (_) { specs = []; }
+    const created = { id, name: bizName, ownerUserId: owner, brief: { description: about }, specs };
     campaignsStore2.campaigns.set(id, created);
     saveCampaigns();
     try { refreshGlobalKB(); } catch (_) {}
