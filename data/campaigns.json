@@ -1,0 +1,26 @@
+{
+  "campaigns": [
+    {
+      "id": "c_acer_aspire_lite",
+      "name": "Acer Aspire Lite",
+      "ownerUserId": "owner@return.local",
+      "brief": {
+        "description": "Intel Core i3 13th Gen - 1305U, 16GB RAM, 512GB SSD, Full HD 15.6\"/39.62 cm, Windows 11 Home, Steel Gray, 1.59 KG, AL15-53, Metal Body, 36 WHR, Thin and Light Premium Laptop"
+      },
+      "specs": [
+        "Intel Core i3 13th Gen - 1305U",
+        "16GB RAM",
+        "512GB SSD",
+        "Full HD 15.6\"/39.62 cm",
+        "Windows 11 Home",
+        "Steel Gray",
+        "1.59 KG",
+        "AL15-53",
+        "Metal Body",
+        "36 WHR",
+        "Thin and Light Premium Laptop"
+      ],
+      "price": "₹33,990"
+    }
+  ]
+}
